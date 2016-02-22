@@ -14,7 +14,7 @@ job "basic_example" {
         }
     }
 
-    task "couchdb-repl" {
+    task "couchdb_repl" {
         type = "oneshot"
         image = "pulcy/couchdb-repl:latest"
         links = [
