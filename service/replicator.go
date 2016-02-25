@@ -39,9 +39,9 @@ type ReplicatorDocument struct {
 	Continuous   bool   `json:"continuous,omitempty"`
 }
 
-func (s *service) setupReplication(url url.URL) error {
+func (s *service) setupReplication(serverURL url.URL) error {
 	// Open couchDB connection to given URL
-	host, port, err := net.SplitHostPort(url.Host)
+	host, port, err := net.SplitHostPort(serverURL.Host)
 	if err != nil {
 		return maskAny(err)
 	}
@@ -57,8 +57,9 @@ func (s *service) setupReplication(url url.URL) error {
 		return maskAny(conn.Ping())
 	}
 	err = retry.Do(ping,
-		retry.MaxTries(15),
+		retry.MaxTries(60),
 		retry.Sleep(time.Second*2),
+		retry.Timeout(time.Minute*5),
 	)
 	if err != nil {
 		return maskAny(errgo.Notef(err, "cannot ping database: %s", err.Error()))
@@ -70,13 +71,16 @@ func (s *service) setupReplication(url url.URL) error {
 
 	// Create replicator document for all servers, for all databases
 	for _, sourceURL := range s.ServerURLs {
-		if sourceURL.String() == url.String() {
+		if sourceURL.String() == serverURL.String() {
 			// Do not replicate with myself
 			continue
 		}
 		for _, dbName := range s.DatabaseNames {
+			authURL := sourceURL
+			authURL.User = url.UserPassword(s.UserName, s.Password)
+			authURL.Path = dbName
 			replDoc := ReplicatorDocument{
-				Source:     sourceURL.String(),
+				Source:     authURL.String(),
 				Target:     dbName,
 				Continuous: true,
 			}

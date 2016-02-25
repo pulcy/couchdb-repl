@@ -53,9 +53,9 @@ func NewService(config ServiceConfig, deps ServiceDependencies) *service {
 // Run performs a setup of the replicator databases
 func (s *service) Run() error {
 	for _, url := range s.ServerURLs {
-		s.Logger.Info("Configuring replication for '%s'", url)
+		s.Logger.Infof("Configuring replication for '%s'", url.Host)
 		if err := s.setupReplication(url); err != nil {
-			s.Logger.Info("Configuring replication for '%s' failed: %#v", url, err)
+			s.Logger.Errorf("Configuring replication for '%s' failed: %#v", url.Host, err)
 			return maskAny(err)
 		}
 	}
