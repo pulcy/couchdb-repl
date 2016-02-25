@@ -1,5 +1,5 @@
 {
 	"registry": "pulcy",
-	"image": "couchdb-repl"
+	"image": "couchdb-repl",
 	"tag-latest": true
 }
