@@ -74,6 +74,7 @@ func cmdMainRun(cmd *cobra.Command, args []string) {
 	if err := service.Run(); err != nil {
 		Exitf("Replication setup failed: %s\n", err.Error())
 	}
+	logger.Info("Replication setup succeeded")
 
 	// We're done
 }
