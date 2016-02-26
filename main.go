@@ -28,10 +28,18 @@ var (
 )
 
 func init() {
-	defaultCouchDBUser := os.Getenv("COUCHDB_USERNAME")
-	defaultCouchDBPassword := os.Getenv("COUCHDB_PASSWORD")
-	cmdMain.Flags().StringVar(&appFlags.UserName, "user", defaultCouchDBUser, "User of databases")
-	cmdMain.Flags().StringVar(&appFlags.Password, "password", defaultCouchDBPassword, "Password of databases")
+	defaultAdminCouchDBUser := os.Getenv("COUCHDB_ADMIN_USERNAME")
+	defaultAdminCouchDBPassword := os.Getenv("COUCHDB_ADMIN_PASSWORD")
+	defaultReplicatorCouchDBUser := os.Getenv("COUCHDB_REPLICATOR_USERNAME")
+	defaultReplicatorCouchDBPassword := os.Getenv("COUCHDB_REPLICATOR_PASSWORD")
+	defaultEditorCouchDBUser := os.Getenv("COUCHDB_USERNAME")
+	defaultEditorCouchDBPassword := os.Getenv("COUCHDB_PASSWORD")
+	cmdMain.Flags().StringVar(&appFlags.AdminUser.UserName, "admin-user", defaultAdminCouchDBUser, "Admin user of databases")
+	cmdMain.Flags().StringVar(&appFlags.AdminUser.Password, "admin-password", defaultAdminCouchDBPassword, "Admin password of databases")
+	cmdMain.Flags().StringVar(&appFlags.EditorUser.UserName, "editor-user", defaultEditorCouchDBUser, "Editor user of databases")
+	cmdMain.Flags().StringVar(&appFlags.EditorUser.Password, "editor-password", defaultEditorCouchDBPassword, "Editor password of databases")
+	cmdMain.Flags().StringVar(&appFlags.ReplicatorUser.UserName, "replicator-user", defaultReplicatorCouchDBUser, "Replicator user of databases")
+	cmdMain.Flags().StringVar(&appFlags.ReplicatorUser.Password, "replicator-password", defaultReplicatorCouchDBPassword, "Replicator password of databases")
 	cmdMain.Flags().StringSliceVar(&appFlags.serverURLs, "server-url", nil, "URLs of the servers to configure")
 	cmdMain.Flags().StringSliceVar(&appFlags.DatabaseNames, "db", nil, "Names of a database to replicate")
 }
@@ -44,8 +52,12 @@ func cmdMainRun(cmd *cobra.Command, args []string) {
 	logger := logging.MustGetLogger(projectName)
 
 	// Validate arguments
-	assertArgIsSet(appFlags.UserName, "--user")
-	assertArgIsSet(appFlags.Password, "--password")
+	assertArgIsSet(appFlags.AdminUser.UserName, "--admin-user")
+	assertArgIsSet(appFlags.AdminUser.Password, "--admin-password")
+	assertArgIsSet(appFlags.EditorUser.UserName, "--editor-user")
+	assertArgIsSet(appFlags.EditorUser.Password, "--editor-password")
+	assertArgIsSet(appFlags.ReplicatorUser.UserName, "--replicator-user")
+	assertArgIsSet(appFlags.ReplicatorUser.Password, "--replicator-password")
 	if len(appFlags.serverURLs) == 0 {
 		Exitf("--server-url must be set\n")
 	}

@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
 	"time"
 
@@ -30,13 +31,21 @@ import (
 
 const (
 	replicatorDbName = "_replicator"
+	roleReplicator   = "replicator"
+	roleEditor       = "editor"
 )
 
 type ReplicatorDocument struct {
-	Source       string `json:"source"`
-	Target       string `json:"target"`
-	CreateTarget bool   `json:"create_target,omitempty"`
-	Continuous   bool   `json:"continuous,omitempty"`
+	Source       string  `json:"source"`
+	Target       string  `json:"target"`
+	CreateTarget bool    `json:"create_target,omitempty"`
+	Continuous   bool    `json:"continuous,omitempty"`
+	UserCtx      UserCtx `json:"user_ctx"`
+}
+
+type UserCtx struct {
+	Name  string   `json:"name"`
+	Roles []string `json:"roles"`
 }
 
 func (s *service) setupReplication(serverURL url.URL) error {
@@ -66,8 +75,34 @@ func (s *service) setupReplication(serverURL url.URL) error {
 	}
 
 	// Connect to replicator database
-	auth := couchdb.BasicAuth{Username: s.UserName, Password: s.Password}
-	db := conn.SelectDB(replicatorDbName, &auth)
+	adminAuth := couchdb.BasicAuth{Username: s.AdminUser.UserName, Password: s.AdminUser.Password}
+
+	// Create replicator user (if needed)
+	replicationRoles := []string{roleReplicator}
+	if err := do(func() error {
+		return s.ensureUser(s.ReplicatorUser, replicationRoles, conn, &adminAuth)
+	}); err != nil {
+		return maskAny(errgo.Notef(err, "failed to create replicator user '%s', on '%s': %s", s.ReplicatorUser.UserName, serverURL, err.Error()))
+	}
+
+	// Create editor user (if needed)
+	editorRoles := []string{roleEditor}
+	if err := do(func() error {
+		return s.ensureUser(s.EditorUser, editorRoles, conn, &adminAuth)
+	}); err != nil {
+		return maskAny(errgo.Notef(err, "failed to create editor user '%s', on '%s': %s", s.EditorUser.UserName, serverURL, err.Error()))
+	}
+
+	// Connect to db
+	replicatorAuth := couchdb.BasicAuth{Username: s.ReplicatorUser.UserName, Password: s.ReplicatorUser.Password}
+
+	// Configure roles for _replicator database
+	adminRoles := []string{roleReplicator}
+	if err := do(func() error {
+		return s.configureDatabaseRoles(nil, adminRoles, conn.SelectDB(replicatorDbName, &adminAuth))
+	}); err != nil {
+		return maskAny(err)
+	}
 
 	// Create replicator document for all servers, for all databases
 	for _, sourceURL := range s.ServerURLs {
@@ -76,23 +111,42 @@ func (s *service) setupReplication(serverURL url.URL) error {
 			continue
 		}
 		for _, dbName := range s.DatabaseNames {
+			// Configure database roles
+			memberRoles := []string{roleEditor}
+			adminRoles := []string{roleReplicator, roleEditor}
+			if err := do(func() error {
+				return s.configureDatabaseRoles(memberRoles, adminRoles, conn.SelectDB(dbName, &adminAuth))
+			}); err != nil {
+				return maskAny(err)
+			}
+
 			authURL := sourceURL
-			authURL.User = url.UserPassword(s.UserName, s.Password)
+			authURL.User = url.UserPassword(s.ReplicatorUser.UserName, s.ReplicatorUser.Password)
 			authURL.Path = dbName
 			replDoc := ReplicatorDocument{
 				Source:     authURL.String(),
 				Target:     dbName,
 				Continuous: true,
+				UserCtx: UserCtx{
+					Name:  s.ReplicatorUser.UserName,
+					Roles: []string{roleReplicator},
+				},
 			}
 			id := createId(replDoc)
 
+			replicatorDb := conn.SelectDB(replicatorDbName, &replicatorAuth)
 			update := func() error {
-				return maskAny(updateOrCreate(db, id, replDoc))
+				s.Logger.Info("Updating replication database")
+				if err := s.updateOrCreate(replicatorDb, id, replDoc); err != nil {
+					s.Logger.Errorf("updateOrCreate failed: %#v", err)
+					return maskAny(err)
+				}
+				return nil
 			}
 			err = retry.Do(update,
-				retry.MaxTries(15),
+				retry.MaxTries(5),
 				retry.Sleep(time.Second*2),
-				retry.Timeout(time.Minute*5),
+				retry.Timeout(time.Minute),
 			)
 			if err != nil {
 				return maskAny(errgo.Notef(err, "failed to setup replicator document for '%s', source '%s': %s", dbName, sourceURL, err.Error()))
@@ -103,7 +157,51 @@ func (s *service) setupReplication(serverURL url.URL) error {
 	return nil
 }
 
-func updateOrCreate(db *couchdb.Database, id string, document ReplicatorDocument) error {
+// ensureUser ensures that the given user exists in the given database server.
+func (s *service) ensureUser(user UserInfo, roles []string, conn *couchdb.Connection, adminAuth couchdb.Auth) error {
+	var userDoc couchdb.UserRecord
+	if _, err := conn.GetUser(user.UserName, &userDoc, adminAuth); err == nil {
+		// user exists, check the roles
+		s.Logger.Debugf("user '%s' already exists", user.UserName)
+		for _, r := range roles {
+			if _, err := conn.GrantRole(user.UserName, r, adminAuth); err != nil {
+				s.Logger.Errorf("Failed to grant role '%s' to user '%s': %#v", r, user.UserName, err)
+				return maskAny(err)
+			}
+		}
+		return nil
+	} else if isCouchNotFound(err) {
+		// Replicator user not found
+		s.Logger.Infof("Adding user '%s'", user.UserName)
+		if _, err := conn.AddUser(user.UserName, user.Password, roles, adminAuth); err != nil {
+			s.Logger.Errorf("Failed to add user '%s': %#v", user.UserName, err)
+			return maskAny(err)
+		}
+		return nil
+	} else {
+		// Some other error
+		return maskAny(err)
+	}
+}
+
+// configureDatabaseRoles ensures that the given database has at least the given member and admin roles.
+func (s *service) configureDatabaseRoles(memberRoles, adminRoles []string, db *couchdb.Database) error {
+	for _, r := range memberRoles {
+		if err := db.AddRole(r, false); err != nil {
+			s.Logger.Errorf("Failed to add member role '%s' to db: %#v", r, err)
+			return maskAny(err)
+		}
+	}
+	for _, r := range adminRoles {
+		if err := db.AddRole(r, true); err != nil {
+			s.Logger.Errorf("Failed to add admin role '%s' to db: %#v", r, err)
+			return maskAny(err)
+		}
+	}
+	return nil
+}
+
+func (s *service) updateOrCreate(db *couchdb.Database, id string, document ReplicatorDocument) error {
 	var oldDoc ReplicatorDocument
 	rev, err := db.Read(id, &oldDoc, nil)
 	if isCouchNotFound(err) {
@@ -111,9 +209,24 @@ func updateOrCreate(db *couchdb.Database, id string, document ReplicatorDocument
 		rev = ""
 	} else if err != nil {
 		return maskAny(err)
+	} else {
+		// Compare document
+		if reflect.DeepEqual(oldDoc, document) {
+			// Nothing has changed
+			s.Logger.Infof("nothing has changed in replicator-document '%s'", id)
+			return nil
+		}
 	}
 
-	if _, err := db.Save(document, id, rev); err != nil {
+	// Remove the old document (if needed)
+	if rev != "" {
+		if _, err := db.Delete(id, rev); err != nil {
+			return maskAny(err)
+		}
+	}
+
+	// Save as new document
+	if _, err := db.Save(document, id, ""); err != nil {
 		return maskAny(err)
 	}
 
@@ -130,4 +243,16 @@ func isCouchNotFound(err error) bool {
 func createId(replDoc ReplicatorDocument) string {
 	data := fmt.Sprintf("%s,%s", replDoc.Source, replDoc.Target)
 	return fmt.Sprintf("%x", sha1.Sum([]byte(data)))
+}
+
+// do executes the given functions, retrying a few times when it fails.
+func do(action func() error) error {
+	if err := retry.Do(action,
+		retry.MaxTries(5),
+		retry.Sleep(time.Second*2),
+		retry.Timeout(time.Minute),
+	); err != nil {
+		return maskAny(err)
+	}
+	return nil
 }

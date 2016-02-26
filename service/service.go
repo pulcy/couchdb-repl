@@ -19,18 +19,23 @@ import (
 	"time"
 
 	"github.com/op/go-logging"
-	"github.com/rhinoman/couchdb-go"
 )
 
 const (
 	couchdbTimeout = time.Millisecond * 500
 )
 
+type UserInfo struct {
+	UserName string
+	Password string
+}
+
 type ServiceConfig struct {
-	ServerURLs    []url.URL
-	UserName      string
-	Password      string
-	DatabaseNames []string
+	ServerURLs     []url.URL
+	AdminUser      UserInfo
+	ReplicatorUser UserInfo
+	EditorUser     UserInfo
+	DatabaseNames  []string
 }
 
 type ServiceDependencies struct {
@@ -39,8 +44,6 @@ type ServiceDependencies struct {
 type service struct {
 	ServiceConfig
 	ServiceDependencies
-
-	conn *couchdb.Connection
 }
 
 func NewService(config ServiceConfig, deps ServiceDependencies) *service {
